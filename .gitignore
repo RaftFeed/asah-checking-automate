@@ -1,0 +1,11 @@
+# Secrets and runtime state — never commit
+selector.json
+
+# Runtime output (screenshots, logs)
+runs/
+
+# Dependencies
+node_modules/
+
+# Environment overrides (not used by default, but just in case)
+.env

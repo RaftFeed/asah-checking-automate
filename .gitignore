@@ -4,8 +4,20 @@ selector.json
 # Runtime output (screenshots, logs)
 runs/
 
+# Form answers (personal content) — edit freely, keep out of VCS if you like
+form-answers.json
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
 # Dependencies
 node_modules/
+.venv/
+.chrome-profile/
 
 # Environment overrides (not used by default, but just in case)
 .env

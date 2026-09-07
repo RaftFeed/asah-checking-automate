@@ -1,0 +1,18 @@
+{
+  "_comment": "Template answers for daily check-in form. Copy this file to form-answers.json and customize for your course. Key = visible label or input name. Values can be: a plain string, an array of strings (rotates by day-of-month), or an object with 'weekday' and 'weekend' arrays (randomly picked by day type).",
+  "answers": {
+    "mood": "Baik",
+    "Pilih kelas yang Anda pelajari": "Belajar Dasar Pemrograman JavaScript",
+    "reflection": {
+      "weekday": [
+        "Hari ini saya fokus menyelesaikan materi modul dan mengerjakan latihannya sampai selesai.",
+        "Progress belajar hari ini lancar, berhasil memahami materi baru dan mempraktikkannya.",
+        "Hari ini mengulang materi yang masih belum terlalu dipahami agar lebih mantap."
+      ],
+      "weekend": [
+        "Akhir pekan ini saya gunakan untuk review modul yang dipelajari selama seminggu terakhir.",
+        "Membaca kembali catatan dan rangkuman materi untuk persiapan materi minggu depan."
+      ]
+    }
+  }
+}

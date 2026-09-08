@@ -12,6 +12,7 @@ Or double-click checkin.bat (same as run, pauses so window stays open).
 
 Reuses selector.json, form-answers.json, runs/ log format from the TS version.
 """
+import argparse
 import datetime
 import json
 import os
@@ -21,6 +22,12 @@ import re
 import sys
 import time
 
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from playwright.sync_api import sync_playwright
 
 HERE = pathlib.Path(__file__).parent
@@ -29,7 +36,34 @@ ANSWERS_PATH = HERE / "form-answers.json"
 RUNS_DIR = HERE / "runs"
 LOG_PATH = RUNS_DIR / "checkin.log"
 LAST_OK_PATH = RUNS_DIR / "last-success.txt"
+LAST_REFLECTION_PATH = RUNS_DIR / "last-reflection.txt"
 LOGIN_URL = "https://www.dicoding.com/login"
+
+WIB = datetime.timezone(datetime.timedelta(hours=7))
+
+
+def now_wib():
+    return datetime.datetime.now(WIB)
+
+
+def load_dotenv():
+    env_path = HERE / ".env"
+    if env_path.exists():
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip("'\"")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except Exception:
+            pass
+
+
+load_dotenv()
+
 
 def get_chrome_path():
     if custom := os.environ.get("CHROME_PATH"):
@@ -86,7 +120,7 @@ def append_run_log(line):
 
 
 def today_str():
-    return datetime.date.today().isoformat()
+    return now_wib().date().isoformat()
 
 
 def read_last_success():
@@ -121,6 +155,33 @@ def read_json(path, default=None):
             return json.load(f)
     except Exception:
         return default
+
+
+def preflight_check():
+    if not SELECTOR_PATH.exists():
+        return False, "selector.json not found. Run `python checkin.py --discover` first."
+    config = read_json(SELECTOR_PATH)
+    if not config or not config.get("pageUrl") or not config.get("strategies"):
+        return False, "selector.json invalid or missing pageUrl/strategies. Run `python checkin.py --discover` first."
+    if ANSWERS_PATH.exists():
+        try:
+            content = ANSWERS_PATH.read_text(encoding="utf-8")
+            json.loads(content)
+        except Exception as e:
+            return False, f"form-answers.json syntax error: {e}"
+    return True, ""
+
+
+def notify_failure(message="Dicoding check-in failed!"):
+    if sys.platform == "win32":
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-Command", "[System.Media.SystemSounds]::Hand.Play()"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            pass
 
 
 def get_done_markers():
@@ -200,14 +261,26 @@ def pick_daily(value):
     if isinstance(value, list):
         if not value:
             return ""
-        return value[(datetime.datetime.now().day - 1) % len(value)]
+        return value[(now_wib().day - 1) % len(value)]
     if isinstance(value, dict):
-        pool = value.get("weekend" if datetime.datetime.now().weekday() >= 5 else "weekday") or []
+        pool = value.get("weekend" if now_wib().weekday() >= 5 else "weekday") or []
         if not pool:
             return ""
-        # ponytail: random has no memory — same text can land adjacent days (~1/len chance).
-        # Upgrade: persist last pick under runs/ and re-roll once on collision.
-        return random.choice(pool)
+        last_pick = ""
+        try:
+            if LAST_REFLECTION_PATH.exists():
+                last_pick = LAST_REFLECTION_PATH.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        choice = random.choice(pool)
+        if len(pool) > 1 and choice == last_pick:
+            choice = random.choice([p for p in pool if p != last_pick] or pool)
+        try:
+            RUNS_DIR.mkdir(exist_ok=True)
+            LAST_REFLECTION_PATH.write_text(choice, encoding="utf-8")
+        except Exception:
+            pass
+        return choice
     return ""
 
 
@@ -333,15 +406,17 @@ def submit_form(page):
     return False
 
 
-def run_checkin():
+def run_checkin(force=False):
     # ponytail: local guard skips browser entirely when today already won. Server text stays fallback.
-    if "--force" not in sys.argv and is_done_today():
+    if not force and is_done_today():
         msg = f"Already checked in today ({today_str()}) — skipping browser. Use --force to rerun."
         log(msg)
         append_run_log("skip-already-done | local guard hit")
         return 0
-    if not SELECTOR_PATH.exists():
-        print("[checkin] selector.json not found. Run `python checkin.py --discover` first.")
+    ok, err = preflight_check()
+    if not ok:
+        log(f"Pre-flight check failed: {err}")
+        notify_failure(err)
         return 1
     config = json.loads(SELECTOR_PATH.read_text(encoding="utf-8"))
     if not config.get("pageUrl") or not config.get("strategies"):
@@ -374,6 +449,7 @@ def run_checkin():
                     log(detail)
                     save_screenshot(page, "session_expired")
                     outcome, code = "session-expired", 2
+                    notify_failure(detail)
                     return code
             if looks_already_checked_in(page):
                 detail = "Page reports already checked in today — nothing to do."
@@ -396,6 +472,7 @@ def run_checkin():
                 log(detail)
                 save_screenshot(page, "button_not_found")
                 outcome, code = "button-not-found", 3
+                notify_failure(detail)
                 return code
             log("Clicking check-in button...")
             button.click(timeout=5000)
@@ -405,33 +482,49 @@ def run_checkin():
                 pass
             page.wait_for_timeout(1500)
             fields = enumerate_form(page)
-            if fields and ANSWERS_PATH.exists():
+            if fields:
+                if not ANSWERS_PATH.exists():
+                    detail = f"Form detected with {len(fields)} fields but form-answers.json missing."
+                    log(detail)
+                    save_screenshot(page, "missing_answers_file")
+                    outcome, code = "missing-answers", 1
+                    notify_failure(detail)
+                    return code
                 parsed = json.loads(ANSWERS_PATH.read_text(encoding="utf-8"))
-                raw = parsed.get("answers", parsed)
+                raw = parsed.get("answers", parsed) if isinstance(parsed, dict) else {}
                 today = {k: pick_daily(v) for k, v in raw.items() if not k.startswith("_")}
                 log(f"Form detected with {len(fields)} fields — filling from form-answers.json")
                 missing = [f for f in fields if f["kind"] != "checkbox" and today.get(f["label"]) is None and today.get(f["name"]) is None]
                 if missing:
-                    log("Missing answers: " + " | ".join(f.get("label") or f.get("name") for f in missing))
+                    detail = "Missing answers: " + " | ".join(f.get("label") or f.get("name") for f in missing)
+                    log(detail)
                     log("Not submitting partial form. Update form-answers.json, then run again.")
-                elif fill_form(page, fields, today) == len(fields) and submit_form(page):
+                    save_screenshot(page, "missing_answers")
+                    outcome, code = "missing-answers", 1
+                    notify_failure(detail)
+                    return code
+                if fill_form(page, fields, today) != len(fields) or not submit_form(page):
+                    detail = "Failed to fill all fields or submit form."
+                    log(detail)
+                    save_screenshot(page, "submit_failed")
+                    outcome, code = "submit-failed", 1
+                    notify_failure(detail)
+                    return code
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1500)
+                # ponytail: one reload confirms persisted state (streak/Terisi render after reload).
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
                     try:
                         page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
                     page.wait_for_timeout(1500)
-                    # ponytail: one reload confirms persisted state (streak/Terisi render after reload).
-                    try:
-                        page.reload(wait_until="domcontentloaded", timeout=30000)
-                        try:
-                            page.wait_for_load_state("networkidle", timeout=10000)
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(1500)
-                    except Exception:
-                        pass
-            elif fields:
-                log(f"Form detected with {len(fields)} fields but form-answers.json missing.")
+                except Exception:
+                    pass
             shot = save_screenshot(page, "after_click")
             try:
                 # ponytail: fresh probe — old locator may be detached after submit/reload.
@@ -445,6 +538,7 @@ def run_checkin():
                 write_last_success()
             else:
                 outcome, detail, code = "clicked-unverified", "Clicked, no success signals. Verify via screenshot.", 1
+                notify_failure(detail)
             log(detail)
             log(f"Screenshot: {shot}")
             return code
@@ -725,10 +819,23 @@ def selftest():
     print("selftest ok")
 
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Daily check-in automation for Dicoding Asah using headed Chrome.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("-f", "--force", action="store_true", help="Bypass today-already-done guard")
+    parser.add_argument("-d", "--discover", action="store_true", help="Run interactive selector discovery")
+    parser.add_argument("-s", "--selftest", action="store_true", help="Run offline sanity selftests and exit")
+    parser.add_argument("--no-pause", action="store_true", help="No-op flag for batch script compatibility")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    if "--selftest" in sys.argv:
+    args = parse_args()
+    if args.selftest:
         selftest()
-    elif "--discover" in sys.argv:
+    elif args.discover:
         sys.exit(run_discover())
     else:
-        sys.exit(run_checkin())
+        sys.exit(run_checkin(force=args.force))

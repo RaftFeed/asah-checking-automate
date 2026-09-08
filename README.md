@@ -91,20 +91,27 @@ python checkin.py
 - If already completed today, it exits immediately without launching the browser.
 - If not, Chrome launches, clicks check-in, fills out the modal from `form-answers.json`, submits, and verifies completion.
 - A screenshot of the final state is saved in `runs/` for verification.
+- **For Windows Task Scheduler**: use `checkin.bat --no-pause` so the batch runner terminates cleanly after completion without waiting for keyboard input.
 
 ### 3. Additional Options
 - **Bypass Daily Guard**:
   ```bash
   python checkin.py --force
   ```
-- **Run Self-tests**:
+- **Run Sanity Selftests**:
   ```bash
   python checkin.py --selftest
+  ```
+- **Run Full Unit Tests**:
+  ```bash
+  python -m unittest test_checkin.py -v
   ```
 
 ---
 
 ## Environment Variables
+
+You can set these in your operating system environment or define them in a local `.env` file (which is automatically parsed at startup):
 
 | Variable | Description |
 |---|---|

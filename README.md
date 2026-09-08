@@ -8,7 +8,8 @@ Automated daily check-in script for the **Dicoding Asah** program using [Playwri
 
 - **Isolated Chrome Profile**: Automates inside a dedicated `.chrome-profile/` directory. Your main Google Chrome browser can stay open while the script runs without lock conflicts.
 - **Headed Automation**: Runs with a real browser window to avoid headless detection and bypass anti-bot mechanisms.
-- **Smart Daily Guard**: Automatically detects if you've already checked in today (via local timestamp and page heuristics) and skips unnecessary browser launches.
+- **Smart Daily Guard**: Automatically tracks both the daily check-in form (`runs/last-success.txt`) and streak belajar (`runs/last-streak.txt`), skipping browser launches only when today's tasks are completed.
+- **Streak Belajar Automation**: Automatically clicks "Lanjutkan" on your active learning subject under *Aktivitas Belajar* to preserve your daily learning streak.
 - **Dynamic Form Rotation**:
   - Supports static answers (strings).
   - Rotates answers daily by day-of-month (`(day - 1) % len(list)`).
@@ -83,17 +84,26 @@ python checkin.py --discover
 - Select the number corresponding to the check-in button.
 - The selector configuration is saved to `selector.json`.
 
-### 2. Daily Check-in
+### 2. Daily Check-in & Streak Belajar
 Run manually or double-click `checkin.bat` (Windows):
 ```bash
 python checkin.py
 ```
-- If already completed today, it exits immediately without launching the browser.
-- If not, Chrome launches, clicks check-in, fills out the modal from `form-answers.json`, submits, and verifies completion.
-- A screenshot of the final state is saved in `runs/` for verification.
+- By default, it executes both the **daily form check-in** and **streak belajar**.
+- If a task is already completed today, it only runs the pending task (or skips if both are done).
+- For streak belajar, it clicks "Lanjutkan" on the first active course under *Aktivitas Belajar* and stays on the tutorial page for 5 seconds to ensure streak registration.
+- Screenshots are saved in `runs/` for verification.
 - **For Windows Task Scheduler**: use `checkin.bat --no-pause` so the batch runner terminates cleanly after completion without waiting for keyboard input.
 
 ### 3. Additional Options
+- **Trigger Streak Only** (skips form check-in):
+  ```bash
+  python checkin.py --streak-only
+  ```
+- **Skip Streak** (runs form check-in only):
+  ```bash
+  python checkin.py --no-streak
+  ```
 - **Bypass Daily Guard**:
   ```bash
   python checkin.py --force

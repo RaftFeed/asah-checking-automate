@@ -112,6 +112,132 @@ class TestDotenvAndDate(unittest.TestCase):
         args3 = checkin.parse_args(["--no-pause"])
         self.assertTrue(args3.no_pause)
 
+    def test_streak_state_tracking(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_runs = checkin.RUNS_DIR
+            orig_streak = checkin.LAST_STREAK_PATH
+            try:
+                checkin.RUNS_DIR = pathlib.Path(tmpdir)
+                checkin.LAST_STREAK_PATH = checkin.RUNS_DIR / "last-streak.txt"
+                self.assertFalse(checkin.is_streak_done_today())
+                self.assertEqual(checkin.read_last_streak(), "")
+                checkin.write_last_streak()
+                self.assertTrue(checkin.is_streak_done_today())
+                self.assertEqual(checkin.read_last_streak(), checkin.today_str())
+            finally:
+                checkin.RUNS_DIR = orig_runs
+                checkin.LAST_STREAK_PATH = orig_streak
+
+    def test_parse_args_streak(self):
+        args = checkin.parse_args(["--streak-only"])
+        self.assertTrue(args.streak_only)
+        self.assertFalse(args.no_streak)
+
+        args2 = checkin.parse_args(["--no-streak"])
+        self.assertFalse(args2.streak_only)
+        self.assertTrue(args2.no_streak)
+
+    def test_plan_run_tasks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_runs = checkin.RUNS_DIR
+            orig_ok = checkin.LAST_OK_PATH
+            orig_streak = checkin.LAST_STREAK_PATH
+            try:
+                checkin.RUNS_DIR = pathlib.Path(tmpdir)
+                checkin.LAST_OK_PATH = checkin.RUNS_DIR / "last-success.txt"
+                checkin.LAST_STREAK_PATH = checkin.RUNS_DIR / "last-streak.txt"
+
+                # 1. Neither done
+                self.assertEqual(checkin.plan_run_tasks(), (True, True))
+
+                # 2. Checkin done, streak not done
+                checkin.write_last_success()
+                self.assertEqual(checkin.plan_run_tasks(), (False, True))
+
+                # 3. Both done, force=False
+                checkin.write_last_streak()
+                self.assertEqual(checkin.plan_run_tasks(), (False, False))
+
+                # 4. Both done, force=True
+                self.assertEqual(checkin.plan_run_tasks(force=True), (True, True))
+
+                # 5. streak_only
+                self.assertEqual(checkin.plan_run_tasks(streak_only=True), (False, False))
+                self.assertEqual(checkin.plan_run_tasks(force=True, streak_only=True), (False, True))
+
+                # Reset streak to not done
+                checkin.LAST_STREAK_PATH.unlink()
+                self.assertEqual(checkin.plan_run_tasks(streak_only=True), (False, True))
+
+                # 6. no_streak
+                self.assertEqual(checkin.plan_run_tasks(no_streak=True), (False, False))
+                self.assertEqual(checkin.plan_run_tasks(force=True, no_streak=True), (True, False))
+            finally:
+                checkin.RUNS_DIR = orig_runs
+                checkin.LAST_OK_PATH = orig_ok
+                checkin.LAST_STREAK_PATH = orig_streak
+
+
+class TestFindContinueButton(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(headless=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def setUp(self):
+        self.page = self.browser.new_page()
+
+    def tearDown(self):
+        self.page.close()
+
+    def test_find_first_active_course_continue(self):
+        html = """
+        <div class="card">
+          <h3>Aktivitas Belajar</h3>
+          <div class="item">
+            <span>Sedang dipelajari</span>
+            <h4>Belajar Dasar Pemrograman JavaScript</h4>
+            <a href="/academies/123/tutorials/1" class="btn">Lanjutkan</a>
+          </div>
+          <div class="item">
+            <span>Telah diselesaikan</span>
+            <h4>Belajar Dasar Pemrograman Web</h4>
+            <a href="/cert" class="btn">Cetak Sertifikat</a>
+          </div>
+          <div class="item">
+            <span>Sedang dipelajari</span>
+            <h4>Asah 2026 - ILT Soft Skill</h4>
+            <a href="/academies/456/tutorials/2" class="btn">Lanjutkan</a>
+          </div>
+        </div>
+        """
+        self.page.set_content(html)
+        btn = checkin.find_continue_button(self.page)
+        self.assertIsNotNone(btn)
+        self.assertEqual(btn.get_attribute("href"), "/academies/123/tutorials/1")
+
+    def test_find_continue_returns_none_when_no_active(self):
+        html = """
+        <div class="card">
+          <h3>Aktivitas Belajar</h3>
+          <div class="item">
+            <span>Telah diselesaikan</span>
+            <h4>Belajar Dasar Pemrograman Web</h4>
+            <a href="/cert" class="btn">Cetak Sertifikat</a>
+          </div>
+        </div>
+        """
+        self.page.set_content(html)
+        btn = checkin.find_continue_button(self.page)
+        self.assertIsNone(btn)
+
+
 if __name__ == "__main__":
     unittest.main()
 

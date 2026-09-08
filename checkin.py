@@ -36,6 +36,7 @@ ANSWERS_PATH = HERE / "form-answers.json"
 RUNS_DIR = HERE / "runs"
 LOG_PATH = RUNS_DIR / "checkin.log"
 LAST_OK_PATH = RUNS_DIR / "last-success.txt"
+LAST_STREAK_PATH = RUNS_DIR / "last-streak.txt"
 LAST_REFLECTION_PATH = RUNS_DIR / "last-reflection.txt"
 LOGIN_URL = "https://www.dicoding.com/login"
 
@@ -137,6 +138,35 @@ def write_last_success():
 
 def is_done_today():
     return read_last_success() == today_str()
+
+
+def read_last_streak():
+    try:
+        return LAST_STREAK_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def write_last_streak():
+    RUNS_DIR.mkdir(exist_ok=True)
+    LAST_STREAK_PATH.write_text(today_str() + "\n", encoding="utf-8")
+
+
+def is_streak_done_today():
+    return read_last_streak() == today_str()
+
+
+def plan_run_tasks(force=False, streak_only=False, no_streak=False):
+    if streak_only:
+        need_checkin = False
+        need_streak = force or not is_streak_done_today()
+    elif no_streak:
+        need_checkin = force or not is_done_today()
+        need_streak = False
+    else:
+        need_checkin = force or not is_done_today()
+        need_streak = force or not is_streak_done_today()
+    return need_checkin, need_streak
 
 
 def save_screenshot(page, label):
@@ -253,6 +283,87 @@ def find_button(page, strategies):
         except Exception:
             log(f"Strategy missed: {s.get('desc', s['selector'])}")
     return None
+
+
+def find_continue_button(page):
+    # ponytail: card under Aktivitas Belajar labeled 'Sedang dipelajari' with 'Lanjutkan' link/button
+    try:
+        cards = page.locator("div, li, tr, section").filter(
+            has_text=re.compile(r"sedang dipelajari", re.I)
+        ).filter(
+            has=page.locator(':is(a, button, [role="button"]):has-text("Lanjutkan")')
+        )
+        if cards.count() > 0:
+            btn = cards.first.locator(':is(a, button, [role="button"]):has-text("Lanjutkan")').first
+            if btn.is_visible():
+                return btn
+    except Exception:
+        pass
+
+    try:
+        cand = page.locator(':is(a, button, [role="button"]):has-text("Lanjutkan"):visible').first
+        if cand.is_visible():
+            return cand
+    except Exception:
+        pass
+
+    return None
+
+
+def trigger_streak_belajar(context, page):
+    log("Starting streak belajar check-in...", "streak")
+    if not re.search(r"/(dashboard|academies)", page.url or ""):
+        page.goto("https://www.dicoding.com/dashboard", wait_until="domcontentloaded", timeout=30000)
+        try:
+            page.wait_for_load_state("networkidle", timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1500)
+
+    btn = find_continue_button(page)
+    if not btn:
+        log("No active course with 'Lanjutkan' found under Sedang dipelajari.", "streak")
+        save_screenshot(page, "streak_button_not_found")
+        return False
+
+    log("Found 'Lanjutkan' button for active course. Clicking...", "streak")
+    active_page = page
+    num_pages = len(context.pages)
+    target_attr = (btn.get_attribute("target") or "").strip().lower()
+
+    if target_attr == "_blank":
+        try:
+            with context.expect_page(timeout=10000) as popup_info:
+                btn.click()
+            active_page = popup_info.value
+        except Exception:
+            active_page = context.pages[-1]
+    else:
+        btn.click()
+        page.wait_for_timeout(1500)
+        if len(context.pages) > num_pages:
+            active_page = context.pages[-1]
+
+    try:
+        active_page.wait_for_load_state("domcontentloaded", timeout=20000)
+    except Exception:
+        pass
+
+    log(f"Landed on course page: {active_page.url}", "streak")
+    log("Dwelling 5 seconds on tutorial to record streak...", "streak")
+    active_page.wait_for_timeout(5000)
+
+    save_screenshot(active_page, "streak_triggered")
+    write_last_streak()
+    log("Streak belajar completed successfully!", "streak")
+    append_run_log(f"streak-success | landed on {active_page.url}")
+
+    if active_page != page:
+        try:
+            active_page.close()
+        except Exception:
+            pass
+    return True
 
 
 def pick_daily(value):
@@ -406,30 +517,37 @@ def submit_form(page):
     return False
 
 
-def run_checkin(force=False):
-    # ponytail: local guard skips browser entirely when today already won. Server text stays fallback.
-    if not force and is_done_today():
-        msg = f"Already checked in today ({today_str()}) — skipping browser. Use --force to rerun."
+def run_checkin(force=False, streak_only=False, no_streak=False):
+    # ponytail: plan which tasks need to run today based on local guards and CLI flags
+    need_checkin, need_streak = plan_run_tasks(force=force, streak_only=streak_only, no_streak=no_streak)
+    if not need_checkin and not need_streak:
+        msg = f"All check-in tasks already done today ({today_str()}) — skipping browser. Use --force to rerun."
         log(msg)
-        append_run_log("skip-already-done | local guard hit")
+        append_run_log("skip-already-done | local guard hit (form and streak)")
         return 0
-    ok, err = preflight_check()
-    if not ok:
-        log(f"Pre-flight check failed: {err}")
-        notify_failure(err)
-        return 1
-    config = json.loads(SELECTOR_PATH.read_text(encoding="utf-8"))
-    if not config.get("pageUrl") or not config.get("strategies"):
+
+    if need_checkin:
+        ok, err = preflight_check()
+        if not ok:
+            log(f"Pre-flight check failed: {err}")
+            notify_failure(err)
+            return 1
+
+    config = read_json(SELECTOR_PATH, {}) or {}
+    target_url = config.get("pageUrl") or "https://www.dicoding.com/dashboard"
+
+    if need_checkin and (not config.get("pageUrl") or not config.get("strategies")):
         print("[checkin] selector.json has no button saved (only doneMarkers). Run `python checkin.py --discover` first.")
         return 1
-    log(f"Loaded config saved at {config.get('savedAt')} for URL: {config.get('pageUrl')}")
+
+    log(f"Starting run (checkin={need_checkin}, streak={need_streak}) for URL: {target_url}")
     log("Launching automation Chrome profile (headed). Main Chrome can stay open.")
     outcome, detail, code = "unknown", "", 0
     with sync_playwright() as p:
         context = launch_chrome(p)
         page = first_page(context)
         try:
-            page.goto(config["pageUrl"], wait_until="domcontentloaded", timeout=30000)
+            page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             try:
                 page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
@@ -438,7 +556,7 @@ def run_checkin(force=False):
             from urllib.parse import urlparse
             if re.search(r"/login(\?|/|$)", urlparse(page.url).path):
                 if try_auto_login(page):
-                    page.goto(config["pageUrl"], wait_until="domcontentloaded", timeout=30000)
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
                     try:
                         page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
@@ -451,97 +569,125 @@ def run_checkin(force=False):
                     outcome, code = "session-expired", 2
                     notify_failure(detail)
                     return code
-            if looks_already_checked_in(page):
-                detail = "Page reports already checked in today — nothing to do."
-                log(detail)
-                save_screenshot(page, "already_checked_in")
-                outcome = "already-checked-in"
-                write_last_success()
-                return 0
-            button = find_button(page, config.get("strategies", []))
-            if not button:
+
+            if need_checkin:
+                checkin_done = False
                 if looks_already_checked_in(page):
-                    detail = "Button absent and page reads as already-checked-in — nothing to do."
+                    detail = "Page reports already checked in today — nothing to do for form."
                     log(detail)
                     save_screenshot(page, "already_checked_in")
                     outcome = "already-checked-in"
                     write_last_success()
-                    return 0
-                dump = dump_page_text(page, "button_not_found")
-                detail = ("No selector strategy matched. Page text saved: " + dump)
-                log(detail)
-                save_screenshot(page, "button_not_found")
-                outcome, code = "button-not-found", 3
-                notify_failure(detail)
-                return code
-            log("Clicking check-in button...")
-            button.click(timeout=5000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
-            fields = enumerate_form(page)
-            if fields:
-                if not ANSWERS_PATH.exists():
-                    detail = f"Form detected with {len(fields)} fields but form-answers.json missing."
-                    log(detail)
-                    save_screenshot(page, "missing_answers_file")
-                    outcome, code = "missing-answers", 1
-                    notify_failure(detail)
-                    return code
-                parsed = json.loads(ANSWERS_PATH.read_text(encoding="utf-8"))
-                raw = parsed.get("answers", parsed) if isinstance(parsed, dict) else {}
-                today = {k: pick_daily(v) for k, v in raw.items() if not k.startswith("_")}
-                log(f"Form detected with {len(fields)} fields — filling from form-answers.json")
-                missing = [f for f in fields if f["kind"] != "checkbox" and today.get(f["label"]) is None and today.get(f["name"]) is None]
-                if missing:
-                    detail = "Missing answers: " + " | ".join(f.get("label") or f.get("name") for f in missing)
-                    log(detail)
-                    log("Not submitting partial form. Update form-answers.json, then run again.")
-                    save_screenshot(page, "missing_answers")
-                    outcome, code = "missing-answers", 1
-                    notify_failure(detail)
-                    return code
-                if fill_form(page, fields, today) != len(fields) or not submit_form(page):
-                    detail = "Failed to fill all fields or submit form."
-                    log(detail)
-                    save_screenshot(page, "submit_failed")
-                    outcome, code = "submit-failed", 1
-                    notify_failure(detail)
-                    return code
-                try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(1500)
-                # ponytail: one reload confirms persisted state (streak/Terisi render after reload).
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    checkin_done = True
+                else:
+                    button = find_button(page, config.get("strategies", []))
+                    if not button:
+                        if looks_already_checked_in(page):
+                            detail = "Button absent and page reads as already-checked-in — nothing to do for form."
+                            log(detail)
+                            save_screenshot(page, "already_checked_in")
+                            outcome = "already-checked-in"
+                            write_last_success()
+                            checkin_done = True
+                        else:
+                            dump = dump_page_text(page, "button_not_found")
+                            detail = ("No selector strategy matched. Page text saved: " + dump)
+                            log(detail)
+                            save_screenshot(page, "button_not_found")
+                            outcome, code = "button-not-found", 3
+                            notify_failure(detail)
+                            return code
+
+                    if not checkin_done:
+                        log("Clicking check-in button...")
+                        button.click(timeout=5000)
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(1500)
+                        fields = enumerate_form(page)
+                        if fields:
+                            if not ANSWERS_PATH.exists():
+                                detail = f"Form detected with {len(fields)} fields but form-answers.json missing."
+                                log(detail)
+                                save_screenshot(page, "missing_answers_file")
+                                outcome, code = "missing-answers", 1
+                                notify_failure(detail)
+                                return code
+                            parsed = json.loads(ANSWERS_PATH.read_text(encoding="utf-8"))
+                            raw = parsed.get("answers", parsed) if isinstance(parsed, dict) else {}
+                            today = {k: pick_daily(v) for k, v in raw.items() if not k.startswith("_")}
+                            log(f"Form detected with {len(fields)} fields — filling from form-answers.json")
+                            missing = [f for f in fields if f["kind"] != "checkbox" and today.get(f["label"]) is None and today.get(f["name"]) is None]
+                            if missing:
+                                detail = "Missing answers: " + " | ".join(f.get("label") or f.get("name") for f in missing)
+                                log(detail)
+                                log("Not submitting partial form. Update form-answers.json, then run again.")
+                                save_screenshot(page, "missing_answers")
+                                outcome, code = "missing-answers", 1
+                                notify_failure(detail)
+                                return code
+                            if fill_form(page, fields, today) != len(fields) or not submit_form(page):
+                                detail = "Failed to fill all fields or submit form."
+                                log(detail)
+                                save_screenshot(page, "submit_failed")
+                                outcome, code = "submit-failed", 1
+                                notify_failure(detail)
+                                return code
+                            try:
+                                page.wait_for_load_state("networkidle", timeout=10000)
+                            except Exception:
+                                pass
+                            page.wait_for_timeout(1500)
+                            # ponytail: one reload confirms persisted state (streak/Terisi render after reload).
+                            try:
+                                page.reload(wait_until="domcontentloaded", timeout=30000)
+                                try:
+                                    page.wait_for_load_state("networkidle", timeout=10000)
+                                except Exception:
+                                    pass
+                                page.wait_for_timeout(1500)
+                            except Exception:
+                                pass
+                        shot = save_screenshot(page, "after_click")
+                        try:
+                            # ponytail: fresh probe — old locator may be detached after submit/reload.
+                            probe = page.locator(config["strategies"][0]["selector"]).first
+                            still_there = probe.is_visible()
+                        except Exception:
+                            still_there = False
+                        if looks_already_checked_in(page) or not still_there:
+                            outcome = "clicked-verified"
+                            detail = "Clicked; success signals detected (button gone / already-checked-in text)."
+                            write_last_success()
+                        else:
+                            outcome, detail, code = "clicked-unverified", "Clicked, no success signals. Verify via screenshot.", 1
+                            notify_failure(detail)
+                            return code
+                        log(detail)
+                        log(f"Screenshot: {shot}")
+
+            if need_streak:
+                if "/dashboard" not in (page.url or ""):
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
                     try:
                         page.wait_for_load_state("networkidle", timeout=10000)
                     except Exception:
                         pass
                     page.wait_for_timeout(1500)
-                except Exception:
-                    pass
-            shot = save_screenshot(page, "after_click")
-            try:
-                # ponytail: fresh probe — old locator may be detached after submit/reload.
-                probe = page.locator(config["strategies"][0]["selector"]).first
-                still_there = probe.is_visible()
-            except Exception:
-                still_there = False
-            if looks_already_checked_in(page) or not still_there:
-                outcome = "clicked-verified"
-                detail = "Clicked; success signals detected (button gone / already-checked-in text)."
-                write_last_success()
-            else:
-                outcome, detail, code = "clicked-unverified", "Clicked, no success signals. Verify via screenshot.", 1
-                notify_failure(detail)
-            log(detail)
-            log(f"Screenshot: {shot}")
-            return code
+
+                streak_ok = trigger_streak_belajar(context, page)
+                if not streak_ok:
+                    detail = "Failed to trigger streak belajar (no active course or click failed)."
+                    log(detail)
+                    outcome, code = "streak-failed", 1
+                    notify_failure(detail)
+                    return code
+                if not outcome or outcome == "unknown":
+                    outcome, detail = "streak-verified", "Streak belajar triggered."
+
+            return 0
         except Exception as e:
             outcome, detail, code = "error", str(e).splitlines()[0] if str(e) else repr(e), 4
             log(f"Error: {detail}")
@@ -804,18 +950,26 @@ def selftest():
     assert pick_daily(["a", "b", "c"]) in ("a", "b", "c")
     assert pick_daily({"weekday": ["x"], "weekend": ["y"]}) in ("x", "y")
     assert pick_daily([]) == ""
-    # ponytail: guard roundtrip on temp path, real last-success.txt untouched.
+    # ponytail: guard roundtrip on temp path, real files untouched.
     import tempfile
-    global LAST_OK_PATH
-    prev, tmp = LAST_OK_PATH, pathlib.Path(tempfile.mkdtemp()) / "last-success.txt"
+    global LAST_OK_PATH, LAST_STREAK_PATH
+    prev_ok, tmp_ok = LAST_OK_PATH, pathlib.Path(tempfile.mkdtemp()) / "last-success.txt"
+    prev_st, tmp_st = LAST_STREAK_PATH, pathlib.Path(tempfile.mkdtemp()) / "last-streak.txt"
     try:
-        LAST_OK_PATH = tmp
+        LAST_OK_PATH = tmp_ok
+        LAST_STREAK_PATH = tmp_st
         assert not is_done_today()
         write_last_success()
         assert is_done_today()
         assert read_last_success() == today_str()
+
+        assert not is_streak_done_today()
+        write_last_streak()
+        assert is_streak_done_today()
+        assert read_last_streak() == today_str()
     finally:
-        LAST_OK_PATH = prev
+        LAST_OK_PATH = prev_ok
+        LAST_STREAK_PATH = prev_st
     print("selftest ok")
 
 
@@ -827,6 +981,8 @@ def parse_args(argv=None):
     parser.add_argument("-f", "--force", action="store_true", help="Bypass today-already-done guard")
     parser.add_argument("-d", "--discover", action="store_true", help="Run interactive selector discovery")
     parser.add_argument("-s", "--selftest", action="store_true", help="Run offline sanity selftests and exit")
+    parser.add_argument("--streak-only", action="store_true", help="Trigger streak belajar without daily form check-in")
+    parser.add_argument("--no-streak", action="store_true", help="Skip streak belajar check-in")
     parser.add_argument("--no-pause", action="store_true", help="No-op flag for batch script compatibility")
     return parser.parse_args(argv)
 
@@ -838,4 +994,4 @@ if __name__ == "__main__":
     elif args.discover:
         sys.exit(run_discover())
     else:
-        sys.exit(run_checkin(force=args.force))
+        sys.exit(run_checkin(force=args.force, streak_only=args.streak_only, no_streak=args.no_streak))

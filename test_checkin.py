@@ -225,20 +225,48 @@ class TestFindContinueButton(unittest.TestCase):
     def test_find_continue_returns_none_when_no_active(self):
         html = """
         <div class="card">
-          <h3>Aktivitas Belajar</h3>
-          <div class="item">
+            <h3>Aktivitas Belajar</h3>
+            <div class="item">
             <span>Telah diselesaikan</span>
             <h4>Belajar Dasar Pemrograman Web</h4>
             <a href="/cert" class="btn">Cetak Sertifikat</a>
-          </div>
+            </div>
         </div>
         """
         self.page.set_content(html)
         btn = checkin.find_continue_button(self.page)
         self.assertIsNone(btn)
 
+    def test_dismiss_classroom_modals(self):
+        html = """
+        <div>
+            <div class="modal show">
+                <button class="sabak-modal__close" aria-label="Tutup">X</button>
+            </div>
+        </div>
+        """
+        self.page.set_content(html)
+        checkin.dismiss_classroom_modals(self.page)
+        # Should execute without throwing any exception
+
+    def test_trigger_streak_belajar_no_active_course(self):
+        html = """
+        <div class="card">
+            <h3>Aktivitas Belajar</h3>
+            <div class="item">
+                <span>Telah diselesaikan</span>
+                <h4>Belajar Dasar Pemrograman Web</h4>
+                <a href="/cert" class="btn">Cetak Sertifikat</a>
+            </div>
+        </div>
+        """
+        self.page.set_content(html)
+        res = checkin.trigger_streak_belajar(self.browser.contexts[0] if self.browser.contexts else None, self.page)
+        self.assertEqual(res, "no-active")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

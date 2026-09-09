@@ -285,6 +285,28 @@ def find_button(page, strategies):
     return None
 
 
+def dismiss_classroom_modals(page):
+    try:
+        page.evaluate("""() => {
+            const buttons = Array.from(document.querySelectorAll('button, a')).filter(b => {
+                const text = (b.textContent || '').trim().toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                const cls = (b.className || '').toLowerCase();
+                return aria.includes('tutup') || aria.includes('close') || aria.includes('lewati') ||
+                       text === 'tutup' || text === '×' || text === 'batal' ||
+                       cls.includes('sabak-modal__close') || cls.includes('shepherd-cancel-icon') || cls.includes('popup-close');
+            });
+            for (const btn of buttons) {
+                if (btn.offsetParent !== null) {
+                    btn.click();
+                    break;
+                }
+            }
+        }""")
+    except Exception:
+        pass
+
+
 def find_continue_button(page):
     # ponytail: card under Aktivitas Belajar labeled 'Sedang dipelajari' with 'Lanjutkan' link/button
     try:
@@ -293,17 +315,10 @@ def find_continue_button(page):
         ).filter(
             has=page.locator(':is(a, button, [role="button"]):has-text("Lanjutkan")')
         )
-        if cards.count() > 0:
-            btn = cards.first.locator(':is(a, button, [role="button"]):has-text("Lanjutkan")').first
+        for i in range(cards.count()):
+            btn = cards.nth(i).locator(':is(a, button, [role="button"]):has-text("Lanjutkan")').first
             if btn.is_visible():
                 return btn
-    except Exception:
-        pass
-
-    try:
-        cand = page.locator(':is(a, button, [role="button"]):has-text("Lanjutkan"):visible').first
-        if cand.is_visible():
-            return cand
     except Exception:
         pass
 
@@ -322,9 +337,9 @@ def trigger_streak_belajar(context, page):
 
     btn = find_continue_button(page)
     if not btn:
-        log("No active course with 'Lanjutkan' found under Sedang dipelajari.", "streak")
-        save_screenshot(page, "streak_button_not_found")
-        return False
+        log("tidak ada kelas aktif (No active course with 'Lanjutkan' found under Sedang dipelajari).", "streak")
+        save_screenshot(page, "streak_no_active_class")
+        return "no-active"
 
     log("Found 'Lanjutkan' button for active course. Clicking...", "streak")
     active_page = page
@@ -349,14 +364,48 @@ def trigger_streak_belajar(context, page):
     except Exception:
         pass
 
+    # Wait for classroom content elements to finish rendering (prevents blank screenshots)
+    try:
+        active_page.locator("h1, .classroom__content, .lesson-nav-btn-next, a:has-text('Selanjutnya'), a:has-text('Tandai selesai')").first.wait_for(
+            state="visible", timeout=15000
+        )
+    except Exception:
+        pass
+
+    dismiss_classroom_modals(active_page)
+    active_page.wait_for_timeout(1000)
+
     log(f"Landed on course page: {active_page.url}", "streak")
-    log("Dwelling 5 seconds on tutorial to record streak...", "streak")
-    active_page.wait_for_timeout(5000)
+
+    # Otomatis klik Selanjutnya / Tandai selesai
+    next_btn = active_page.locator(
+        ".lesson-nav-btn-next, a:has-text('Selanjutnya'), a:has-text('Tandai selesai'), button:has-text('Selanjutnya'), button:has-text('Tandai selesai')"
+    ).first
+    advanced = False
+    try:
+        if next_btn.is_visible():
+            btn_text = next_btn.inner_text().strip()
+            log(f"Menemukan tombol '{btn_text}'. Mengklik untuk memajukan materi...", "streak")
+            next_btn.click()
+            try:
+                active_page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            active_page.wait_for_timeout(2000)
+            dismiss_classroom_modals(active_page)
+            advanced = True
+            log(f"Materi berhasil dimajukan ke: {active_page.url}", "streak")
+        else:
+            log("Tombol 'Selanjutnya'/'Tandai selesai' tidak terlihat. Menunggu 5 detik untuk pencatatan streak...", "streak")
+            active_page.wait_for_timeout(5000)
+    except Exception as e:
+        log(f"Peringatan saat mencoba klik tombol lanjut materi: {e}", "streak")
+        active_page.wait_for_timeout(3000)
 
     save_screenshot(active_page, "streak_triggered")
     write_last_streak()
     log("Streak belajar completed successfully!", "streak")
-    append_run_log(f"streak-success | landed on {active_page.url}")
+    append_run_log(f"streak-success | {'advanced-material' if advanced else 'visited'} | landed on {active_page.url}")
 
     if active_page != page:
         try:
@@ -677,15 +726,21 @@ def run_checkin(force=False, streak_only=False, no_streak=False):
                         pass
                     page.wait_for_timeout(1500)
 
-                streak_ok = trigger_streak_belajar(context, page)
-                if not streak_ok:
-                    detail = "Failed to trigger streak belajar (no active course or click failed)."
+                streak_res = trigger_streak_belajar(context, page)
+                if streak_res == "no-active":
+                    detail = "tidak ada kelas aktif"
+                    log(f"Streak belajar dibatalkan: {detail}", "streak")
+                    if not outcome or outcome == "unknown":
+                        outcome = "streak-cancelled"
+                elif not streak_res:
+                    detail = "Failed to trigger streak belajar (navigation or click failed)."
                     log(detail)
                     outcome, code = "streak-failed", 1
                     notify_failure(detail)
                     return code
-                if not outcome or outcome == "unknown":
-                    outcome, detail = "streak-verified", "Streak belajar triggered."
+                else:
+                    if not outcome or outcome == "unknown":
+                        outcome, detail = "streak-verified", "Streak belajar triggered."
 
             return 0
         except Exception as e:
@@ -740,7 +795,13 @@ def try_auto_login(page):
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
         page.locator('input[name="login_email"]:visible').fill(email, timeout=10000)
         page.locator('input[name="login_password"]:visible').fill(password, timeout=10000)
-        page.locator('#login-form button[type="submit"]:visible, #login-form button:has-text("Masuk")').first.click(timeout=5000)
+        try:
+            rem = page.locator('input[name="remember_me"], #remember_me').first
+            if rem.is_visible() and not rem.is_checked():
+                rem.check(force=True)
+        except Exception:
+            pass
+        page.locator('button[type="submit"]:visible, button:has-text("Masuk"):visible').first.click(timeout=5000)
         page.wait_for_timeout(2000)
         try:
             page.wait_for_load_state("networkidle", timeout=15000)

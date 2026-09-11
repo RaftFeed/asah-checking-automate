@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Daily check-in for Dicoding Asah. Headed isolated Chrome profile (no headless => no headless flags).
+r"""Daily check-in for Dicoding Asah. Headed isolated Chrome profile (no headless => no headless flags).
 
 Usage:
-  .venv\\Scripts\\python checkin.py            # run check-in (main Chrome can stay open)
-  .venv\\Scripts\\python checkin.py --force    # bypass today-already-done guard
-  .venv\\Scripts\\python checkin.py --discover # one-time setup: login, pick button, save selector.json
-  .venv\\Scripts\\python checkin.py --selftest # assert pick_daily rotation, no browser needed
+  .venv\Scripts\python checkin.py            # run check-in (main Chrome can stay open)
+  .venv\Scripts\python checkin.py --force    # bypass today-already-done guard
+  .venv\Scripts\python checkin.py --selftest # assert pick_daily rotation, no browser needed
 
 Skips browser when runs/last-success.txt holds today. Guard resets daily by date compare.
 Or double-click checkin.bat (same as run, pauses so window stays open).
@@ -89,10 +88,10 @@ def get_chrome_path():
 CHROME_EXE = get_chrome_path()
 CHROME_PROFILE = str(HERE / ".chrome-profile")
 
-CHECKIN_TEXT_HINTS = ["check-in", "checkin", "check in", "absen", "hadir", "presensi"]
 BUILTIN_DONE_MARKERS = [
     "already checked in", "sudah check-in", "sudah absen", "sudah melakukan check-in",
     "checked in today", "see you tomorrow", "sampai jumpa besok",
+    "lihat check-in",
 ]
 SUBMIT_CANDIDATES = [
     '#checkinForm button[type="submit"]', '#checkinSubmit',
@@ -188,11 +187,12 @@ def read_json(path, default=None):
 
 
 def preflight_check():
-    if not SELECTOR_PATH.exists():
-        return False, "selector.json not found. Run `python checkin.py --discover` first."
-    config = read_json(SELECTOR_PATH)
-    if not config or not config.get("pageUrl") or not config.get("strategies"):
-        return False, "selector.json invalid or missing pageUrl/strategies. Run `python checkin.py --discover` first."
+    if SELECTOR_PATH.exists():
+        try:
+            content = SELECTOR_PATH.read_text(encoding="utf-8")
+            json.loads(content)
+        except Exception as e:
+            return False, f"selector.json syntax error: {e}"
     if ANSWERS_PATH.exists():
         try:
             content = ANSWERS_PATH.read_text(encoding="utf-8")
@@ -236,9 +236,19 @@ def add_custom_done_markers(markers):
 
 def looks_already_checked_in(page):
     try:
-        return bool(page.evaluate(
+        has_marker = bool(page.evaluate(
             "(ms) => (document.body?.innerText ?? '').replace(/\\s+/g, ' ').toLowerCase().split('').length >= 0 && ms.some((m) => (document.body?.innerText ?? '').replace(/\\s+/g, ' ').toLowerCase().includes(m))",
             get_done_markers()))
+        if has_marker:
+            return True
+        card_done = page.evaluate("""() => {
+            const cards = [...document.querySelectorAll('div, section, aside, li')];
+            return cards.some(c => {
+                const t = (c.innerText || '').toLowerCase();
+                return t.includes('daily check-in') && (t.includes('terisi') || t.includes('lihat check-in'));
+            });
+        }""")
+        return bool(card_done)
     except Exception:
         return False
 
@@ -282,6 +292,55 @@ def find_button(page, strategies):
             return loc
         except Exception:
             log(f"Strategy missed: {s.get('desc', s['selector'])}")
+    return None
+
+
+def find_checkin_button(page, config=None):
+    # 1. Scoped match: inside card/section with "Daily Check-in" heading
+    try:
+        cards = page.locator("div, section, aside, li, article").filter(
+            has_text=re.compile(r"daily\s+check-?in", re.I)
+        ).filter(
+            has=page.locator(':is(button, a, [role="button"]):has-text("Mulai isi check-in")')
+        )
+        for i in range(cards.count()):
+            btn = cards.nth(i).locator(':is(button, a, [role="button"]):has-text("Mulai isi check-in")').first
+            if btn.is_visible():
+                log("Check-in button found via card-scoped 'Mulai isi check-in'")
+                return btn
+    except Exception:
+        pass
+
+    # 2. Global match: any button/link with "Mulai isi check-in"
+    try:
+        btn = page.locator(':is(button, a, [role="button"]):has-text("Mulai isi check-in")').first
+        if btn.is_visible():
+            log("Check-in button found via global 'Mulai isi check-in'")
+            return btn
+    except Exception:
+        pass
+
+    # 3. Fuzzy match inside Daily Check-in card
+    try:
+        cards = page.locator("div, section, aside, li, article").filter(
+            has_text=re.compile(r"daily\s+check-?in", re.I)
+        )
+        for i in range(cards.count()):
+            btn = cards.nth(i).locator(':is(button, a, [role="button"])').filter(
+                has_text=re.compile(r"mulai.*check-?in|isi.*check-?in", re.I)
+            ).first
+            if btn.is_visible():
+                log("Check-in button found via fuzzy card match")
+                return btn
+    except Exception:
+        pass
+
+    # 4. Fallback to custom strategies from config/selector.json if provided
+    if config and config.get("strategies"):
+        btn = find_button(page, config["strategies"])
+        if btn:
+            return btn
+
     return None
 
 
@@ -585,10 +644,6 @@ def run_checkin(force=False, streak_only=False, no_streak=False):
     config = read_json(SELECTOR_PATH, {}) or {}
     target_url = config.get("pageUrl") or "https://www.dicoding.com/dashboard"
 
-    if need_checkin and (not config.get("pageUrl") or not config.get("strategies")):
-        print("[checkin] selector.json has no button saved (only doneMarkers). Run `python checkin.py --discover` first.")
-        return 1
-
     log(f"Starting run (checkin={need_checkin}, streak={need_streak}) for URL: {target_url}")
     log("Launching automation Chrome profile (headed). Main Chrome can stay open.")
     outcome, detail, code = "unknown", "", 0
@@ -612,7 +667,7 @@ def run_checkin(force=False, streak_only=False, no_streak=False):
                         pass
                     log(f"Landed on: {page.url}")
                 else:
-                    detail = "Redirected to login. Set DICODING_EMAIL/DICODING_PASSWORD env vars or run `python checkin.py --discover` to log in again."
+                    detail = "Redirected to login. Set DICODING_EMAIL/DICODING_PASSWORD env vars or log in to Chrome profile."
                     log(detail)
                     save_screenshot(page, "session_expired")
                     outcome, code = "session-expired", 2
@@ -629,7 +684,7 @@ def run_checkin(force=False, streak_only=False, no_streak=False):
                     write_last_success()
                     checkin_done = True
                 else:
-                    button = find_button(page, config.get("strategies", []))
+                    button = find_checkin_button(page, config)
                     if not button:
                         if looks_already_checked_in(page):
                             detail = "Button absent and page reads as already-checked-in — nothing to do for form."
@@ -702,8 +757,8 @@ def run_checkin(force=False, streak_only=False, no_streak=False):
                         shot = save_screenshot(page, "after_click")
                         try:
                             # ponytail: fresh probe — old locator may be detached after submit/reload.
-                            probe = page.locator(config["strategies"][0]["selector"]).first
-                            still_there = probe.is_visible()
+                            btn_probe = find_checkin_button(page, config)
+                            still_there = btn_probe is not None and btn_probe.is_visible()
                         except Exception:
                             still_there = False
                         if looks_already_checked_in(page) or not still_there:
@@ -843,169 +898,6 @@ def is_google_trap(url):
         return False
 
 
-def find_candidates(page):
-    out = []
-    frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
-
-    # ponytail: JS held as one string, not per-frame builder. Ceiling: cross-origin iframes skipped silently.
-    def scan(frame, in_iframe):
-        try:
-            return frame.evaluate("""(hints) => {
-              const esc = (s) => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
-              const pats = hints.map((h) => new RegExp(esc(h).replace(/\\?\\s+/g, '\\s+'), 'i'));
-              const out = [];
-              for (const el of document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"], div[onclick], [class*="checkin" i], [class*="check-in" i], [id*="checkin" i], [id*="check-in" i]')) {
-                const s = window.getComputedStyle(el);
-                if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity) < 0.1) continue;
-                const text = (el.textContent ?? '').replace(/\\s+/g, ' ').trim();
-                const cls = (el.className?.toString?.() ?? '');
-                if (!(pats.some((q) => q.test(text)) || pats.some((q) => q.test(cls)) || pats.some((q) => q.test(el.id ?? '')))) continue;
-                if (text.length > 120) continue;
-                const r = el.getBoundingClientRect();
-                if (r.width === 0 && r.height === 0) continue;
-                out.push({text, tag: el.tagName.toLowerCase(),
-                  rect: {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)}});
-              }
-              const seen = new Set();
-              return out.filter((c) => { const k = `${c.text}|${c.rect.x}|${c.rect.y}`; if (seen.has(k)) return false; seen.add(k); return true; });
-            }""", CHECKIN_TEXT_HINTS)
-        except Exception:
-            return []
-    for i, fr in enumerate(frames):
-        for c in scan(fr, i > 0):
-            out.append({**c, "in_iframe": i > 0})
-    return [{"idx": i + 1, **c} for i, c in enumerate(out)]
-
-
-def build_strategies(page, chosen):
-    t = chosen["text"].replace('"', '\\"')
-    strategies = [
-        {"desc": "button/link with exact text", "selector": f':is(button, a, [role="button"]):has-text("{t}")'},
-        {"desc": "any element with text", "selector": f'text={chosen["text"][:60]}'},
-    ]
-    if chosen.get("in_iframe"):
-        return strategies
-    try:
-        hit = page.evaluate("""(rect) => {
-          const hit = [...document.querySelectorAll('*')].find((el) => { const r = el.getBoundingClientRect();
-            return Math.abs(r.x-rect.x)<3 && Math.abs(r.y-rect.y)<3 && Math.abs(r.width-rect.w)<3 && Math.abs(r.height-rect.h)<3; });
-          if (!hit) return null;
-          const attrs = {};
-          for (const a of hit.attributes) if (a.name.startsWith('data-') && a.value) attrs[a.name] = a.value;
-          return {tag: hit.tagName.toLowerCase(), id: hit.id, attrs}; }""", chosen["rect"])
-    except Exception:
-        hit = None
-    if hit:
-        if hit.get("id"):
-            strategies.append({"desc": "element id", "selector": f'#{hit["id"]}'})
-        for k, v in (hit.get("attrs") or {}).items():
-            strategies.append({"desc": f'attribute {k}="{v}"', "selector": f'[{k}="{v}"]'})
-    return strategies
-
-
-def run_discover():
-    log("Starting interactive discovery...", "discover")
-    with sync_playwright() as p:
-        context = launch_chrome(p)
-        page = first_page(context)
-        try:
-            page.goto(LOGIN_URL, wait_until="domcontentloaded")
-            logged = try_auto_login(page)
-            if not logged:
-                log("Browser opened on Dicoding login. Log in (email+password; Google OAuth blocked in automation).", "discover")
-            deadline = time.time() + 10 * 60
-            last = time.time()
-            while time.time() < deadline:
-                if is_google_trap(page.url):
-                    print("\nGOOGLE LOGIN TRAP — use EMAIL+PASSWORD, not Google button. Back to login...\n")
-                    try:
-                        page.goto(LOGIN_URL, wait_until="domcontentloaded")
-                    except Exception:
-                        pass
-                    continue
-                logged = is_logged_in(page)
-                if logged:
-                    break
-                resolve_session_duplication(page)
-                if time.time() - last > 15:
-                    log(f"Still waiting... current page: {page.url}", "discover")
-                    last = time.time()
-                page.wait_for_timeout(2000)
-            if not logged:
-                print("[discover] Timed out waiting for login.")
-                return 1
-            log("Looks logged in!", "discover")
-            target = input("\nPaste check-in page URL (Enter if already there): ").strip()
-            if target:
-                if not re.match(r"https?://", target, re.I):
-                    target = "https://" + target
-                log(f"Navigating to {target} ...", "discover")
-                page.goto(target, wait_until="domcontentloaded")
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass
-            log(f"Current URL: {page.url}", "discover")
-            cands = find_candidates(page)
-            if not cands:
-                if looks_already_checked_in(page):
-                    print("\n[discover] Page says ALREADY CHECKED IN — button hidden. Re-run discover tomorrow when visible.")
-                    return 0
-                dump = dump_page_text(page, "discover_no_candidates")
-                print(f"[discover] No candidates. Page text: {dump}")
-                phrase = input("Paste exact already-checked-in phrase to teach (Enter to skip): ").strip()
-                if phrase:
-                    add_custom_done_markers([phrase])
-                    print(f'[discover] Recorded "{phrase}". checkin will now recognize it.')
-                    return 0
-                print("[discover] Navigate to button page, re-run discover.")
-                return 1
-            print("\nFound candidates:")
-            for c in cands:
-                print(f'  {c["idx"]}. [{"iframe, " if c["in_iframe"] else ""}<{c["tag"]}>] "{c["text"]}" @ ({c["rect"]["x"]},{c["rect"]["y"]})')
-            try:
-                choice = int(input("\nWhich number is the check-in button? ").strip())
-            except ValueError:
-                choice = -1
-            chosen = next((c for c in cands if c["idx"] == choice), None)
-            if not chosen:
-                print("[discover] Invalid choice.")
-                return 1
-            strategies = build_strategies(page, chosen)
-            prev = read_json(SELECTOR_PATH, {}) or {}
-            cfg = {"pageUrl": page.url, "strategies": strategies, "visibleText": chosen["text"],
-                   "savedAt": datetime.datetime.now(datetime.timezone.utc).isoformat()}
-            if isinstance(prev.get("doneMarkers"), list) and prev["doneMarkers"]:
-                cfg["doneMarkers"] = prev["doneMarkers"]
-            SELECTOR_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-            log(f"Saved -> {SELECTOR_PATH}", "discover")
-            if input("\nTest primary selector now (clicks for real!)? [y/N]: ").strip().lower() == "y":
-                try:
-                    page.locator(strategies[0]["selector"]).first.click(timeout=5000)
-                    try:
-                        page.wait_for_load_state("networkidle", timeout=10000)
-                    except Exception:
-                        pass
-                    page.wait_for_timeout(1500)
-                    fields = enumerate_form(page)
-                    if fields:
-                        print("\nFORM DETECTED — author these keys in form-answers.json:")
-                        for f in fields:
-                            print(f'  kind={f["kind"]} name="{f["name"]}" label="{f["label"]}"' +
-                                  (f' options=[{" | ".join(f["options"])}]' if f.get("options") else ""))
-                    else:
-                        log("No form after click (toast/modal-only flow).", "discover")
-                except Exception as e:
-                    log(f"Click test failed: {str(e).splitlines()[0] if str(e) else e}", "discover")
-            print("\n=== Discovery complete ===\nNext: python checkin.py")
-            return 0
-        finally:
-            try:
-                context.close()
-            except Exception:
-                pass
-
-
 def selftest():
     assert pick_daily("fixed") == "fixed"
     assert pick_daily(["a", "b", "c"]) in ("a", "b", "c")
@@ -1040,7 +932,6 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("-f", "--force", action="store_true", help="Bypass today-already-done guard")
-    parser.add_argument("-d", "--discover", action="store_true", help="Run interactive selector discovery")
     parser.add_argument("-s", "--selftest", action="store_true", help="Run offline sanity selftests and exit")
     parser.add_argument("--streak-only", action="store_true", help="Trigger streak belajar without daily form check-in")
     parser.add_argument("--no-streak", action="store_true", help="Skip streak belajar check-in")
@@ -1052,7 +943,5 @@ if __name__ == "__main__":
     args = parse_args()
     if args.selftest:
         selftest()
-    elif args.discover:
-        sys.exit(run_discover())
     else:
         sys.exit(run_checkin(force=args.force, streak_only=args.streak_only, no_streak=args.no_streak))

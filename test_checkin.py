@@ -70,32 +70,32 @@ class TestDotenvAndDate(unittest.TestCase):
                 checkin.SELECTOR_PATH = tmp / "selector.json"
                 checkin.ANSWERS_PATH = tmp / "form-answers.json"
 
-                # 1. Missing selector.json
-                ok, err = checkin.preflight_check()
-                self.assertFalse(ok)
-                self.assertIn("selector.json not found", err)
-
-                # 2. Invalid selector.json
-                checkin.SELECTOR_PATH.write_text('{"pageUrl": "https://example.com"}', encoding="utf-8")
-                ok, err = checkin.preflight_check()
-                self.assertFalse(ok)
-                self.assertIn("invalid", err.lower())
-
-                # 3. Valid selector, invalid form-answers.json
-                checkin.SELECTOR_PATH.write_text(
-                    '{"pageUrl": "https://example.com", "strategies": [{"selector": "button"}]}',
-                    encoding="utf-8"
-                )
-                checkin.ANSWERS_PATH.write_text('{ invalid json }', encoding="utf-8")
-                ok, err = checkin.preflight_check()
-                self.assertFalse(ok)
-                self.assertIn("syntax error", err.lower())
-
-                # 4. Valid selector and valid form-answers
+                # 1. Missing selector.json with valid form-answers is ALLOWED (zero-config)
                 checkin.ANSWERS_PATH.write_text('{"answers": {}}', encoding="utf-8")
                 ok, err = checkin.preflight_check()
                 self.assertTrue(ok)
                 self.assertEqual(err, "")
+
+                # 2. Invalid selector.json syntax fails
+                checkin.SELECTOR_PATH.write_text('{ invalid json }', encoding="utf-8")
+                ok, err = checkin.preflight_check()
+                self.assertFalse(ok)
+                self.assertIn("syntax error", err.lower())
+
+                # 3. Valid selector.json (optional config)
+                checkin.SELECTOR_PATH.write_text(
+                    '{"pageUrl": "https://example.com", "doneMarkers": ["custom"]}',
+                    encoding="utf-8"
+                )
+                ok, err = checkin.preflight_check()
+                self.assertTrue(ok)
+                self.assertEqual(err, "")
+
+                # 4. Invalid form-answers.json fails
+                checkin.ANSWERS_PATH.write_text('{ invalid json }', encoding="utf-8")
+                ok, err = checkin.preflight_check()
+                self.assertFalse(ok)
+                self.assertIn("syntax error", err.lower())
             finally:
                 checkin.SELECTOR_PATH = orig_sel
                 checkin.ANSWERS_PATH = orig_ans
@@ -103,14 +103,10 @@ class TestDotenvAndDate(unittest.TestCase):
     def test_parse_args(self):
         args = checkin.parse_args(["--force"])
         self.assertTrue(args.force)
-        self.assertFalse(args.discover)
         self.assertFalse(args.selftest)
 
-        args2 = checkin.parse_args(["-d"])
-        self.assertTrue(args2.discover)
-
-        args3 = checkin.parse_args(["--no-pause"])
-        self.assertTrue(args3.no_pause)
+        args2 = checkin.parse_args(["--no-pause"])
+        self.assertTrue(args2.no_pause)
 
     def test_streak_state_tracking(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -263,6 +259,83 @@ class TestFindContinueButton(unittest.TestCase):
         self.page.set_content(html)
         res = checkin.trigger_streak_belajar(self.browser.contexts[0] if self.browser.contexts else None, self.page)
         self.assertEqual(res, "no-active")
+
+
+class TestFindCheckinButton(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(headless=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def setUp(self):
+        self.page = self.browser.new_page()
+
+    def tearDown(self):
+        self.page.close()
+
+    def test_find_checkin_button_in_card(self):
+        html = """
+        <div class="card">
+            <h3>Daily Check-in</h3>
+            <p>Check-in rutin menciptakan ritme belajar yang teratur.</p>
+            <button class="btn btn-primary">Mulai isi check-in</button>
+        </div>
+        """
+        self.page.set_content(html)
+        btn = checkin.find_checkin_button(self.page)
+        self.assertIsNotNone(btn)
+        self.assertIn("Mulai isi check-in", btn.text_content())
+
+    def test_find_checkin_button_global_fallback(self):
+        html = """
+        <div>
+            <a href="/check-in" class="btn">Mulai isi check-in</a>
+        </div>
+        """
+        self.page.set_content(html)
+        btn = checkin.find_checkin_button(self.page)
+        self.assertIsNotNone(btn)
+        self.assertIn("Mulai isi check-in", btn.text_content())
+
+    def test_find_checkin_button_returns_none_when_completed(self):
+        html = """
+        <div class="card">
+            <h3>Daily Check-in</h3>
+            <span class="badge">Terisi</span>
+            <a href="/checkin/detail">Lihat check-in</a>
+        </div>
+        """
+        self.page.set_content(html)
+        btn = checkin.find_checkin_button(self.page)
+        self.assertIsNone(btn)
+
+    def test_looks_already_checked_in_with_builtin_markers(self):
+        html = """
+        <div class="card">
+            <h3>Daily Check-in</h3>
+            <span>Daily Check-in @ Hari ini • Sep 11, 2026</span>
+            <span class="badge">Terisi</span>
+            <a href="#">Lihat check-in</a>
+        </div>
+        """
+        self.page.set_content(html)
+        self.assertTrue(checkin.looks_already_checked_in(self.page))
+
+    def test_looks_already_checked_in_false_when_pending(self):
+        html = """
+        <div class="card">
+            <h3>Daily Check-in</h3>
+            <button>Mulai isi check-in</button>
+        </div>
+        """
+        self.page.set_content(html)
+        self.assertFalse(checkin.looks_already_checked_in(self.page))
 
 
 if __name__ == "__main__":

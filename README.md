@@ -14,7 +14,7 @@ Automated daily check-in script for the **Dicoding Asah** program using [Playwri
   - Supports static answers (strings).
   - Rotates answers daily by day-of-month (`(day - 1) % len(list)`).
   - Supports weekday vs. weekend reflection pools.
-- **Interactive Button Discovery (`--discover`)**: One-time interactive setup to log in, scan the dashboard, and generate robust selector strategies (`selector.json`).
+- **Automatic Button Discovery**: Autonomously locates the "Mulai isi check-in" button under the *Daily Check-in* section without requiring manual selector configuration.
 - **One-Click Batch Runner (`checkin.bat`)**: Double-click to run on Windows, ideal for Windows Task Scheduler or desktop shortcuts.
 
 ---
@@ -74,28 +74,19 @@ Automated daily check-in script for the **Dicoding Asah** program using [Playwri
 
 ## Usage
 
-### 1. One-Time Discovery Setup
-Before running the daily check-in for the first time, run the interactive discovery:
-```bash
-python checkin.py --discover
-```
-- A Chrome window will open. Log in to your Dicoding account.
-- The script detects login completion and scans for check-in buttons.
-- Select the number corresponding to the check-in button.
-- The selector configuration is saved to `selector.json`.
-
-### 2. Daily Check-in & Streak Belajar
+### 1. Daily Check-in & Streak Belajar
 Run manually or double-click `checkin.bat` (Windows):
 ```bash
 python checkin.py
 ```
+- Zero-config & autonomous: automatically detects "Mulai isi check-in" under the **Daily Check-in** section.
 - By default, it executes both the **daily form check-in** and **streak belajar**.
 - If a task is already completed today, it only runs the pending task (or skips if both are done).
 - For streak belajar, it clicks "Lanjutkan" on the first active course under *Aktivitas Belajar* and stays on the tutorial page for 5 seconds to ensure streak registration.
 - Screenshots are saved in `runs/` for verification.
 - **For Windows Task Scheduler**: use `checkin.bat --no-pause` so the batch runner terminates cleanly after completion without waiting for keyboard input.
 
-### 3. Additional Options
+### 2. Additional Options
 - **Trigger Streak Only** (skips form check-in):
   ```bash
   python checkin.py --streak-only
